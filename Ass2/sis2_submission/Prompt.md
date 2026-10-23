@@ -86,15 +86,3 @@ At the end, create `ai/run_log.md` with:
 - anything you could not fix and why.
 Then give me a short summary in Russian.
 ```
-
-Follow-up message in the same session, once the local Docker container that was breaking the network was gone: `run again`
-
-## Prompt D: finishing (same agent and session as prompt C)
-
-Tool: the same Claude Code session, Claude Opus 5.5 (`claude-opus-5-5`).
-
-Message (in Russian, translated here): "look at the assignment context in the agentcontext file and continue". Original: `в файле agentcontext посмотри контекст задания и продолжай`.
-
-The context it refers to is the file [SIS2_agent_context.md](SIS2_agent_context.md), used verbatim: assignment, grading, verified site facts, the oracle table, what the agent may change, and the remaining to-do list.
-
-The agent asked me two questions during this step; my answers: leave TC-PWD-01 red and explain it in the README (option B, no `test.fail`), and keep TC-PWD-02 as it is.
