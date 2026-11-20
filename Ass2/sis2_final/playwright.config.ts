@@ -1,15 +1,20 @@
 import { defineConfig, devices } from '@playwright/test';
 import { STORAGE_STATE } from './fixtures/paths';
 
-const BASE_URL = process.env.BASE_URL ?? 'https://practicesoftwaretesting.com';
+// `||` (not `??`): in CI an unset workflow input arrives as an empty string.
+const BASE_URL = process.env.BASE_URL || 'https://practicesoftwaretesting.com';
+const isCI = !!process.env.CI;
 
 export default defineConfig({
   testDir: './tests',
-  fullyParallel: true,
-  forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0, // course rule: retry only in CI, max 2
-  workers: process.env.CI ? 2 : undefined,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  fullyParallel: true, // required for --shard to split by test, not by file
+  forbidOnly: isCI,
+  retries: isCI ? 2 : 0, // course rule: retry only in CI, max 2
+  workers: isCI ? 2 : undefined,
+  // CI: blob is merged into one HTML report by the merge-reports job (merge.config.ts).
+  reporter: isCI
+    ? [['list'], ['blob'], ['junit', { outputFile: 'reports/junit.xml' }]]
+    : [['list'], ['html', { open: 'never' }]],
   timeout: 60_000,
   expect: { timeout: 10_000 },
   use: {
@@ -17,6 +22,7 @@ export default defineConfig({
     testIdAttribute: 'data-test',
     trace: 'on-first-retry', // changed from retain-on-failure (course setting)
     screenshot: 'only-on-failure',
+    video: 'retain-on-failure',
   },
   projects: [
     // Creates ONE fresh user through the API, logs in through the UI once and saves storageState.

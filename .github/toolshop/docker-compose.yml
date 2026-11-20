@@ -1,0 +1,48 @@
+# Toolshop (Practice Software Testing, sprint5 v2.5) for CI.
+# Based on docker-compose.prod.yml of testsmith-io/practice-software-testing, with two changes:
+#  - the upstream "web" and "cron" images are published for arm64 only and crash on
+#    GitHub's amd64 runners ("exec format error"). "web" is rebuilt from the same
+#    nginx base image plus upstream's vhost.conf; "cron" (invoice clean-up) is not needed.
+#  - image tags are pinned to 2.5, the version running on practicesoftwaretesting.com.
+# TOOLSHOP_DIR = the pinned checkout of the upstream repo (only _docker/vhost.conf is used).
+name: pst
+
+services:
+  laravel-api:
+    image: testsmith/practice-software-testing-sprint5-api:2.5
+    environment:
+      - PHP_OPCACHE_VALIDATE_TIMESTAMPS=1
+      - DB_PORT=3306
+      - DB_HOST=mariadb
+      - host=localhost
+      - DISABLE_LOGGING=true
+    volumes:
+      - laravel-app-code:/var/www
+    depends_on:
+      - mariadb
+
+  angular-ui:
+    image: testsmith/practice-software-testing-sprint5-ui:2.5
+    ports:
+      - 4200:4200
+    command: bash -c "ng serve --host 0.0.0.0 --port 4200"
+
+  web:
+    image: nginx:1.23.3-alpine
+    ports:
+      - 8091:80
+    volumes:
+      - ${TOOLSHOP_DIR}/_docker/vhost.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - laravel-api
+
+  mariadb:
+    image: yobasystems/alpine-mariadb:10.6.11
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: user
+      MYSQL_PASSWORD: root
+      MYSQL_DATABASE: toolshop
+
+volumes:
+  laravel-app-code:

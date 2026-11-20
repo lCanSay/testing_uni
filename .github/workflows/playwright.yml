@@ -1,0 +1,178 @@
+name: Playwright Tests
+
+# Every push and every pull request, no branch filters. Manual runs via workflow_dispatch.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: 'Number of shards (1 = baseline for the before/after timing)'
+        type: choice
+        options: ['4', '1']
+        default: '4'
+      target:
+        description: 'Site under test. local = Toolshop in Docker on the runner (default). The public sites sit behind a Cloudflare bot check that usually blocks GitHub runners.'
+        type: choice
+        options: ['local', 'production', 'with-bugs']
+        default: 'local'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Playwright project lives in a sub-folder of this monorepo.
+  PROJECT_DIR: Ass2/sis2_final
+  # Upstream Toolshop repo, pinned; only its nginx vhost.conf is used (see .github/toolshop/).
+  TOOLSHOP_REF: ae7caecb811dd8952c09d997e69be7cb946ecd44
+  COMPOSE: docker compose -f .github/toolshop/docker-compose.yml
+
+jobs:
+  test:
+    name: test shard ${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Ass2/sis2_final
+    strategy:
+      fail-fast: false
+      matrix:
+        # push / pull_request: inputs are empty -> always 4 shards.
+        shardIndex: ${{ fromJSON(inputs.shards == '1' && '[1]' || '[1, 2, 3, 4]') }}
+        shardTotal: ${{ fromJSON(inputs.shards == '1' && '[1]' || '[4]') }}
+    env:
+      # push / pull_request: inputs are empty -> local Docker instance.
+      LOCAL_TOOLSHOP: ${{ inputs.target == '' || inputs.target == 'local' }}
+      BASE_URL: ${{ inputs.target == 'production' && 'https://practicesoftwaretesting.com' || inputs.target == 'with-bugs' && 'https://with-bugs.practicesoftwaretesting.com' || 'http://localhost:4200' }}
+      API_URL: ${{ inputs.target == 'production' && 'https://api.practicesoftwaretesting.com' || inputs.target == 'with-bugs' && 'https://api-with-bugs.practicesoftwaretesting.com' || 'http://localhost:8091' }}
+      # No secrets needed: every test registers its own user through the API.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Toolshop nginx config
+        if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          repository: testsmith-io/practice-software-testing
+          ref: ${{ env.TOOLSHOP_REF }}
+          path: toolshop
+          sparse-checkout: _docker/vhost.conf
+          sparse-checkout-cone-mode: false
+
+      - name: Start Toolshop (prebuilt images)
+        if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
+        working-directory: .
+        env:
+          TOOLSHOP_DIR: ${{ github.workspace }}/toolshop
+        run: $COMPOSE up -d --quiet-pull
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Ass2/sis2_final/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        # One retry: --with-deps runs apt-get, and a flaky Ubuntu mirror once failed a shard
+        # with "Unable to locate package fonts-..." (infrastructure, not the tests).
+        run: |
+          npx playwright install --with-deps chromium || {
+            echo "::warning::browser install failed, retrying once"; sleep 15
+            npx playwright install --with-deps chromium
+          }
+
+      - name: Seed database and wait for Toolshop
+        if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
+        working-directory: .
+        env:
+          TOOLSHOP_DIR: ${{ github.workspace }}/toolshop
+        run: |
+          seeded=false
+          for i in $(seq 1 30); do
+            if $COMPOSE exec -T laravel-api php artisan migrate:fresh --seed --force; then
+              seeded=true; break
+            fi
+            echo "database not ready yet ($i/30)"; sleep 5
+          done
+          $seeded || { echo "::error::Toolshop database could not be seeded"; exit 1; }
+          curl -fsS --retry 60 --retry-delay 5 --retry-all-errors "$API_URL/status"; echo
+          curl -fsS --retry 60 --retry-delay 5 --retry-all-errors -o /dev/null "$BASE_URL" && echo "UI is up"
+
+      - name: Run Playwright tests
+        run: npx playwright test --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+
+      - name: Toolshop container logs
+        if: ${{ failure() && env.LOCAL_TOOLSHOP == 'true' }}
+        working-directory: .
+        env:
+          TOOLSHOP_DIR: ${{ github.workspace }}/toolshop
+        run: $COMPOSE logs --tail 100
+
+      - name: Upload blob report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-${{ matrix.shardIndex }}
+          path: ${{ env.PROJECT_DIR }}/blob-report
+          retention-days: 1
+
+      - name: Upload traces, screenshots, videos and JUnit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.shardIndex }}
+          path: |
+            ${{ env.PROJECT_DIR }}/test-results/
+            ${{ env.PROJECT_DIR }}/reports/
+          retention-days: 14
+
+  merge-reports:
+    # Runs even when shards failed. NOTE: this job is green even if tests are red,
+    # so it must NOT be the merge gate (see README).
+    needs: [test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Ass2/sis2_final
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Ass2/sis2_final/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download blob reports
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ env.PROJECT_DIR }}/all-blob-reports
+          pattern: blob-report-*
+          merge-multiple: true
+
+      - name: Merge into one HTML report and JUnit
+        run: npx playwright merge-reports --config merge.config.ts ./all-blob-reports
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: ${{ env.PROJECT_DIR }}/playwright-report
+          retention-days: 14
+
+      - name: Upload merged JUnit
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: ${{ env.PROJECT_DIR }}/reports/junit-merged.xml
+          retention-days: 14

@@ -1,5 +1,9 @@
 # Toolshop v5.0: Playwright + TypeScript suite
 
+[![Playwright Tests](https://github.com/lCanSay/testing_uni/actions/workflows/playwright.yml/badge.svg?branch=main)](https://github.com/lCanSay/testing_uni/actions/workflows/playwright.yml)
+
+CI (SIS 3) is described in [Continuous integration](#continuous-integration-sis-3) below.
+
 Five specs against https://practicesoftwaretesting.com: register, login, buy a product, compare products, reset password. Test cases are listed in [Description.md](Description.md).
 
 ## Run
@@ -49,6 +53,8 @@ The code was written without access to the site. It was then run against https:/
 
 Result: **8 passed, 1 failed.** The failure is TC-PWD-01, caused by the site defect below. The test is correct and is left red on purpose: changing the expected text to the raw key would make the suite accept the bug.
 
+*SIS 3 update:* a permanently red test makes a CI gate useless (every run is red, so a new failure is invisible). TC-PWD-01 is now marked `test.fail()` with an `issue: DEF-01` annotation. The assertion is unchanged and still fails on every run; Playwright reports it as an *expected* failure. When DEF-01 is fixed, the test "unexpectedly passes", turns the run red, and `test.fail()` must be removed.
+
 Also checked: `--workers=1` (8 passed, 1 failed, the same test), `--repeat-each=2` (15 passed, 2 failed, both TC-PWD-01), and changing "My account" to "My accountX" in `data/messages.ts` makes TC-LOG-01 fail with `Expected: "My accountX" / Received: "My account"` (reverted afterwards).
 
 ## Known defect DEF-01
@@ -83,3 +89,104 @@ Note (diagnosis, not part of what the user sees): in the app source (`sprint5/UI
 - `ai/run_A_before_raw/`, `ai/run_B_after_raw/`: raw AI output of each prompt, unchanged.
 - `Review.md`: what the AI produced, what I changed and why.
 - The project in the repo root is run B after my corrections.
+
+## Continuous integration (SIS 3)
+
+Workflow: [`.github/workflows/playwright.yml`](../../.github/workflows/playwright.yml) (repo root; this repo is a monorepo, so every job runs with `working-directory: Ass2/sis2_final`).
+
+| Trigger | What runs |
+|---|---|
+| every `push`, every `pull_request` (no branch filters) | full suite, 4 shards |
+| `workflow_dispatch` | inputs `shards` (`4` / `1`) and `target` (`local` / `production` / `with-bugs`) |
+
+### System under test: Toolshop in Docker, not the public site
+
+The first CI runs went against https://practicesoftwaretesting.com and were red: the site sits behind a **Cloudflare bot check** that answers GitHub runner IPs with a "Performing security verification" page instead of the app (seen in `error-context.md` of 15 of 16 failed tests; a switch to full Chromium in new headless mode changed nothing, so the block is by IP). Local runs from a home IP pass. A pipeline that a fork cannot run green is useless, so by default every shard starts its **own Toolshop instance** on the runner:
+
+- [`.github/toolshop/docker-compose.yml`](../../.github/toolshop/docker-compose.yml): prebuilt images `testsmith/practice-software-testing-sprint5-api:2.5` / `-ui:2.5` (same version as the public site), `mariadb`, and `nginx:1.23.3-alpine` with the upstream `vhost.conf` (fetched from the upstream repo at a pinned commit). Upstream's own `web` and `cron` images exist for **arm64 only** and crash on GitHub's amd64 runners (`exec format error`), hence the own compose file; `cron` (invoice clean-up) is not needed.
+- The DB is created with `php artisan migrate:fresh --seed`; the step waits for `GET /status` (API, `:8091`) and the UI (`:4200`).
+- Tests run with `BASE_URL=http://localhost:4200`, `API_URL=http://localhost:8091`. Each shard has its own database, so shards cannot interfere.
+- Manual runs can still target the public sites (`target: production` / `with-bugs`), with the Cloudflare caveat.
+
+Pipeline:
+
+1. **`test`** — matrix of 4 shards (`--shard=i/4`, `fail-fast: false`), Node 22, `setup-node` with npm cache, `npm ci`, `npx playwright install --with-deps chromium`, `npx playwright test --shard=…` (whole suite, no grep). Uploads `blob-report-N` (1 day, intermediate) and `test-results-N` (`test-results/` + `reports/junit.xml`, 14 days) even when tests fail (`if: !cancelled()`).
+2. **`merge-reports`** — `needs: [test]`, runs unless cancelled, downloads `blob-report-*` with `merge-multiple: true`, runs `npx playwright merge-reports --config merge.config.ts ./all-blob-reports`. Uploads `playwright-report` (one HTML for all shards) and `junit-report` (`reports/junit-merged.xml`), 14 days.
+
+`concurrency` cancels an older run of the same branch when a new commit arrives.
+
+### CI vs local config
+
+`playwright.config.ts` switches on `process.env.CI` (GitHub sets `CI=true`):
+
+| | Local | CI |
+|---|---|---|
+| reporters | `list` + `html` | `list` + `blob` + `junit` (`reports/junit.xml`) |
+| `forbidOnly` | off | on (a forgotten `test.only` fails the run) |
+| `retries` | 0 | 2 |
+| `workers` | default | 2 |
+
+Same everywhere: `fullyParallel: true` (otherwise `--shard` splits by file and with 5 spec files some shards idle), `trace: 'on-first-retry'`, `screenshot: 'only-on-failure'`, `video: 'retain-on-failure'`, projects `setup` / `anonymous` / `authenticated`, `testIdAttribute: 'data-test'`.
+
+Run the CI mode locally:
+
+```bash
+npm ci
+CI=true npx playwright test            # -> blob-report/, reports/junit.xml
+mkdir -p all-blob-reports
+CI=true npx playwright test --shard=1/2 && cp blob-report/*.zip all-blob-reports/
+CI=true npx playwright test --shard=2/2 && cp blob-report/*.zip all-blob-reports/
+npx playwright merge-reports --config merge.config.ts ./all-blob-reports
+```
+
+### Why a fork goes green without secrets
+
+The workflow reads **no** `secrets` or `vars`, and the app runs on the runner itself. Every test creates its own user through `POST /users/register` with a random password (see Decisions above), so there are no logins to store. `BASE_URL` / `API_URL` are set by the workflow; in code (`playwright.config.ts`, `fixtures/api.ts`) they fall back to production, so a plain local `npx playwright test` works as before. The seeded demo accounts (`customer@practicesoftwaretesting.com` / `welcome01`) are deliberately not used: they are shared by everyone on the internet and can be locked by three wrong passwords. No absolute paths: storage state goes to `.auth/` relative to the project.
+
+### When a test fails: what to open
+
+1. Run summary → job `test shard N/4` that is red → log shows the failing test and the assertion diff.
+2. Artefact **`playwright-report`** → unzip, `npx playwright show-report playwright-report`: all shards in one report, error, screenshot, video, and the trace of the first retry.
+3. Artefact **`test-results-N`** → raw `trace.zip` (open with `npx playwright show-trace` or trace.playwright.dev), `test-failed-1.png`, `video.webm`, `error-context.md` per attempt, plus `reports/junit.xml`.
+4. Artefact **`junit-report`** → `junit-merged.xml` for tools that read JUnit.
+
+Checked locally: breaking the expected title in TC-LOG-01 gives three attempts; `retry1` contains `trace.zip`, every attempt contains screenshot, video and error-context.
+
+Checked in CI: these artefacts were enough to diagnose both real CI failures without re-running anything: the Cloudflare page (page snapshot in `error-context.md`), and a `422` from `POST /invoices` with body `"The city does not belong to the selected country"` (request and response inside `trace.zip`).
+
+### A race in the SIS 2 suite that CI exposed
+
+TC-BUY-01 passed in one CI run and failed 3/3 attempts in another. At checkout the UI's postcode lookup auto-fills street/city/state, `AddressForm` overwrote them with the factory's "Springfield, Illinois", and the API validates city/state against the postcode (`AddressMatchesCountry`) → `422`. The test only passed when the lookup response happened to arrive *after* our fill. Fix: `tests/auth.setup.ts` now registers the checkout user with the locality returned by `GET /postcode-lookup` (`ToolshopApi.withLookedUpLocality`), so typed, auto-filled and server-expected values agree. Specs and page objects unchanged.
+
+Testing the bug-seeded site manually: *Actions → Playwright Tests → Run workflow*, `target = with-bugs` (subject to the Cloudflare check described above).
+
+### Sharding: before / after
+
+Median of 3 `workflow_dispatch` runs each (target `local`, runs alternated 1/4/1/4/1/4 on 2026-11-23). *Total run time* = wall clock of the whole run including `merge-reports`; *Run tests step* = the *Run Playwright tests* step, for 4 shards the slowest shard. Numbers are from the GitHub API (`/actions/runs/{id}/jobs`), seconds.
+
+| Configuration | Total run time | Run tests step (slowest shard) | Run |
+|---|---|---|---|
+| 1 shard | 98 s (96 / 98 / 142) | 21 s (22 / 21 / 20) | [median](https://github.com/lCanSay/testing_uni/actions/runs/45247192871) · [1](https://github.com/lCanSay/testing_uni/actions/runs/45246577736) · [3](https://github.com/lCanSay/testing_uni/actions/runs/45247801964) |
+| 4 shards | 96 s (98 / 92 / 96) | 14 s (14 / 13 / 14) | [median](https://github.com/lCanSay/testing_uni/actions/runs/45248245309) · [1](https://github.com/lCanSay/testing_uni/actions/runs/45246881683) · [2](https://github.com/lCanSay/testing_uni/actions/runs/45247504536) |
+
+Conclusion: **sharding gives practically nothing for this suite.** The test step itself drops from ~21 s to ~14 s, but the whole run is the same ~1.5 min because each shard pays the same fixed setup (checkout, npm ci from cache, Playwright browser + system deps, pulling and seeding the Toolshop containers: ~45–55 s per shard) before running 2–3 tests, plus ~15 s for `merge-reports`. 9 tests are too few to amortise that; 4 shards also cost 4× the runner minutes. The one slow 1-shard run (142 s) was slower in setup (Docker pull/seed), not in tests — runner noise is larger than the sharding gain. Sharding is kept because the assignment requires it and it starts paying off once the suite grows (test time grows, setup per shard stays constant).
+
+### What blocks a merge and what only reports, and why
+
+| Signal | Effect | Why |
+|---|---|---|
+| any test still failing after 2 retries | **blocks** | the behaviour under test is broken (or the test is) — must be looked at before merge |
+| `test.only` left in code | **blocks** (`forbidOnly`) | otherwise CI silently runs one test |
+| expected failure (TC-PWD-01 / DEF-01) | reports only | known site defect, documented; it blocks again automatically if it starts passing |
+| flaky test (failed, then passed on retry) | reports only | marked *flaky* in the HTML report; must be investigated (the address race above was green in one run and red in the next), but one timing hiccup should not block work |
+| artefacts, HTML report, JUnit | informational | evidence for diagnosis, not a verdict |
+| `merge-reports` job | informational | **it is green even when tests are red** — it only merges whatever blobs exist (`if: !cancelled()`). Using it as the gate would let red PRs through. |
+
+The gate therefore relies on the shard jobs. Branch protection for `main` → *Require status checks to pass*:
+
+- `test shard 1/4`
+- `test shard 2/4`
+- `test shard 3/4`
+- `test shard 4/4`
+
+(Not `merge-reports`.) If the shard count ever changes, these names change too; an alternative is a single `gate` job with `needs: [test]` that fails unless `needs.test.result == 'success'`, then only `gate` is required.
