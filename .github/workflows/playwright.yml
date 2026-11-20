@@ -78,7 +78,13 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        # One retry: --with-deps runs apt-get, and a flaky Ubuntu mirror once failed a shard
+        # with "Unable to locate package fonts-..." (infrastructure, not the tests).
+        run: |
+          npx playwright install --with-deps chromium || {
+            echo "::warning::browser install failed, retrying once"; sleep 15
+            npx playwright install --with-deps chromium
+          }
 
       - name: Seed database and wait for Toolshop
         if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
