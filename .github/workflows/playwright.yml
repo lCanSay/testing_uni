@@ -24,10 +24,9 @@ concurrency:
 env:
   # The Playwright project lives in a sub-folder of this monorepo.
   PROJECT_DIR: Ass2/sis2_final
-  # Toolshop sources (only docker-compose.prod.yml is used), pinned for reproducible runs.
+  # Upstream Toolshop repo, pinned; only its nginx vhost.conf is used (see .github/toolshop/).
   TOOLSHOP_REF: ae7caecb811dd8952c09d997e69be7cb946ecd44
-  SPRINT: sprint5
-  DISABLE_LOGGING: 'true'
+  COMPOSE: docker compose -f .github/toolshop/docker-compose.yml
 
 jobs:
   test:
@@ -52,20 +51,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch Toolshop docker-compose
+      - name: Fetch Toolshop nginx config
         if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: testsmith-io/practice-software-testing
           ref: ${{ env.TOOLSHOP_REF }}
           path: toolshop
-          sparse-checkout: docker-compose.prod.yml
+          sparse-checkout: _docker/vhost.conf
           sparse-checkout-cone-mode: false
 
       - name: Start Toolshop (prebuilt images)
         if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
-        working-directory: toolshop
-        run: docker compose -p pst -f docker-compose.prod.yml up -d --quiet-pull
+        working-directory: .
+        env:
+          TOOLSHOP_DIR: ${{ github.workspace }}/toolshop
+        run: $COMPOSE up -d --quiet-pull
 
       - uses: actions/setup-node@v4
         with:
@@ -81,11 +82,13 @@ jobs:
 
       - name: Seed database and wait for Toolshop
         if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
-        working-directory: toolshop
+        working-directory: .
+        env:
+          TOOLSHOP_DIR: ${{ github.workspace }}/toolshop
         run: |
           seeded=false
           for i in $(seq 1 30); do
-            if docker compose -p pst -f docker-compose.prod.yml exec -T laravel-api php artisan migrate:fresh --seed --force; then
+            if $COMPOSE exec -T laravel-api php artisan migrate:fresh --seed --force; then
               seeded=true; break
             fi
             echo "database not ready yet ($i/30)"; sleep 5
@@ -99,8 +102,10 @@ jobs:
 
       - name: Toolshop container logs
         if: ${{ failure() && env.LOCAL_TOOLSHOP == 'true' }}
-        working-directory: toolshop
-        run: docker compose -p pst -f docker-compose.prod.yml logs --tail 100
+        working-directory: .
+        env:
+          TOOLSHOP_DIR: ${{ github.workspace }}/toolshop
+        run: $COMPOSE logs --tail 100
 
       - name: Upload blob report
         if: ${{ !cancelled() }}
