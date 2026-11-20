@@ -1,4 +1,10 @@
 node_modules/
 test-results/
 playwright-report/
+blob-report/
+reports/
+all-blob-reports/
 .auth/
+playwright/.auth/
+.act-artifacts/
+.secrets
