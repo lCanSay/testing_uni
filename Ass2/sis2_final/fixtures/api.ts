@@ -1,5 +1,5 @@
 import { expect, type APIRequestContext } from '@playwright/test';
-import type { User } from '../data/userFactory';
+import type { Address, User } from '../data/userFactory';
 
 export const API_URL = process.env.API_URL ?? 'https://api.practicesoftwaretesting.com';
 
@@ -34,6 +34,21 @@ export class ToolshopApi {
       },
     });
     expect(res.status(), `register ${user.email}: ${await res.text()}`).toBe(201);
+  }
+
+  /**
+   * The site's postcode lookup decides street/city/state for a country + postcode, the UI
+   * auto-fills them, and POST /invoices rejects (422) a city/state that does not match.
+   * Returns the address with the locality the site itself expects, so typed and auto-filled
+   * values agree.
+   */
+  async withLookedUpLocality(address: Address): Promise<Address> {
+    const res = await this.request.get(`${API_URL}/postcode-lookup`, {
+      params: { country: address.country, postcode: address.postalCode, house_number: address.houseNumber },
+    });
+    expect(res.ok(), `postcode lookup ${address.country}/${address.postalCode}: ${await res.text()}`).toBeTruthy();
+    const found = (await res.json()) as { street: string; city: string; state: string };
+    return { ...address, street: found.street, city: found.city, state: found.state };
   }
 
   /** First N purchasable (in stock, not rental) products with distinct names. */

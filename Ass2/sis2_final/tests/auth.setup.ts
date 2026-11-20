@@ -6,7 +6,9 @@ import { AUTH_DIR, SESSION_USER_FILE, STORAGE_STATE } from '../fixtures/paths';
 
 // Runs once per `playwright test`: fresh (non-seeded) user, API creation, one UI login.
 setup('create user and store signed-in state', async ({ api, loginPage, accountPage, page }) => {
-  const user = buildUser();
+  // This user's address is used at checkout, where the server checks city/state against the postcode.
+  const draft = buildUser();
+  const user = { ...draft, address: await api.withLookedUpLocality(draft.address) };
   await api.registerUser(user);
 
   await loginPage.open();
