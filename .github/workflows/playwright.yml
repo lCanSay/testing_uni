@@ -1,0 +1,130 @@
+name: Playwright Tests
+
+# Every push and every pull request, no branch filters. Manual runs via workflow_dispatch.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: 'Number of shards (1 = baseline for the before/after timing)'
+        type: choice
+        options: ['4', '1']
+        default: '4'
+      base_url:
+        description: 'Site under test (e.g. https://with-bugs.practicesoftwaretesting.com)'
+        type: string
+        default: 'https://practicesoftwaretesting.com'
+      api_url:
+        description: 'API of that site (e.g. https://api-with-bugs.practicesoftwaretesting.com)'
+        type: string
+        default: 'https://api.practicesoftwaretesting.com'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Playwright project lives in a sub-folder of this monorepo.
+  PROJECT_DIR: Ass2/sis2_final
+
+jobs:
+  test:
+    name: test shard ${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Ass2/sis2_final
+    strategy:
+      fail-fast: false
+      matrix:
+        # push / pull_request: inputs are empty -> always 4 shards.
+        shardIndex: ${{ fromJSON(inputs.shards == '1' && '[1]' || '[1, 2, 3, 4]') }}
+        shardTotal: ${{ fromJSON(inputs.shards == '1' && '[1]' || '[4]') }}
+    env:
+      # No secrets needed: every test registers its own user through the public API.
+      # Inputs are empty on push/PR -> production (the code has the same fallbacks).
+      BASE_URL: ${{ inputs.base_url || 'https://practicesoftwaretesting.com' }}
+      API_URL: ${{ inputs.api_url || 'https://api.practicesoftwaretesting.com' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Ass2/sis2_final/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        run: npx playwright test --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+
+      - name: Upload blob report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-${{ matrix.shardIndex }}
+          path: ${{ env.PROJECT_DIR }}/blob-report
+          retention-days: 1
+
+      - name: Upload traces, screenshots, videos and JUnit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.shardIndex }}
+          path: |
+            ${{ env.PROJECT_DIR }}/test-results/
+            ${{ env.PROJECT_DIR }}/reports/
+          retention-days: 14
+
+  merge-reports:
+    # Runs even when shards failed. NOTE: this job is green even if tests are red,
+    # so it must NOT be the merge gate (see README).
+    needs: [test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Ass2/sis2_final
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Ass2/sis2_final/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download blob reports
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ env.PROJECT_DIR }}/all-blob-reports
+          pattern: blob-report-*
+          merge-multiple: true
+
+      - name: Merge into one HTML report and JUnit
+        run: npx playwright merge-reports --config merge.config.ts ./all-blob-reports
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: ${{ env.PROJECT_DIR }}/playwright-report
+          retention-days: 14
+
+      - name: Upload merged JUnit
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: ${{ env.PROJECT_DIR }}/reports/junit-merged.xml
+          retention-days: 14
