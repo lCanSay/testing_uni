@@ -11,14 +11,11 @@ on:
         type: choice
         options: ['4', '1']
         default: '4'
-      base_url:
-        description: 'Site under test (e.g. https://with-bugs.practicesoftwaretesting.com)'
-        type: string
-        default: 'https://practicesoftwaretesting.com'
-      api_url:
-        description: 'API of that site (e.g. https://api-with-bugs.practicesoftwaretesting.com)'
-        type: string
-        default: 'https://api.practicesoftwaretesting.com'
+      target:
+        description: 'Site under test. local = Toolshop in Docker on the runner (default). The public sites sit behind a Cloudflare bot check that usually blocks GitHub runners.'
+        type: choice
+        options: ['local', 'production', 'with-bugs']
+        default: 'local'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,6 +24,10 @@ concurrency:
 env:
   # The Playwright project lives in a sub-folder of this monorepo.
   PROJECT_DIR: Ass2/sis2_final
+  # Toolshop sources (only docker-compose.prod.yml is used), pinned for reproducible runs.
+  TOOLSHOP_REF: ae7caecb811dd8952c09d997e69be7cb946ecd44
+  SPRINT: sprint5
+  DISABLE_LOGGING: 'true'
 
 jobs:
   test:
@@ -43,12 +44,28 @@ jobs:
         shardIndex: ${{ fromJSON(inputs.shards == '1' && '[1]' || '[1, 2, 3, 4]') }}
         shardTotal: ${{ fromJSON(inputs.shards == '1' && '[1]' || '[4]') }}
     env:
-      # No secrets needed: every test registers its own user through the public API.
-      # Inputs are empty on push/PR -> production (the code has the same fallbacks).
-      BASE_URL: ${{ inputs.base_url || 'https://practicesoftwaretesting.com' }}
-      API_URL: ${{ inputs.api_url || 'https://api.practicesoftwaretesting.com' }}
+      # push / pull_request: inputs are empty -> local Docker instance.
+      LOCAL_TOOLSHOP: ${{ inputs.target == '' || inputs.target == 'local' }}
+      BASE_URL: ${{ inputs.target == 'production' && 'https://practicesoftwaretesting.com' || inputs.target == 'with-bugs' && 'https://with-bugs.practicesoftwaretesting.com' || 'http://localhost:4200' }}
+      API_URL: ${{ inputs.target == 'production' && 'https://api.practicesoftwaretesting.com' || inputs.target == 'with-bugs' && 'https://api-with-bugs.practicesoftwaretesting.com' || 'http://localhost:8091' }}
+      # No secrets needed: every test registers its own user through the API.
     steps:
       - uses: actions/checkout@v4
+
+      - name: Fetch Toolshop docker-compose
+        if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          repository: testsmith-io/practice-software-testing
+          ref: ${{ env.TOOLSHOP_REF }}
+          path: toolshop
+          sparse-checkout: docker-compose.prod.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Start Toolshop (prebuilt images)
+        if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
+        working-directory: toolshop
+        run: docker compose -p pst -f docker-compose.prod.yml up -d --quiet-pull
 
       - uses: actions/setup-node@v4
         with:
@@ -62,8 +79,28 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
+      - name: Seed database and wait for Toolshop
+        if: ${{ env.LOCAL_TOOLSHOP == 'true' }}
+        working-directory: toolshop
+        run: |
+          seeded=false
+          for i in $(seq 1 30); do
+            if docker compose -p pst -f docker-compose.prod.yml exec -T laravel-api php artisan migrate:fresh --seed --force; then
+              seeded=true; break
+            fi
+            echo "database not ready yet ($i/30)"; sleep 5
+          done
+          $seeded || { echo "::error::Toolshop database could not be seeded"; exit 1; }
+          curl -fsS --retry 60 --retry-delay 5 --retry-all-errors "$API_URL/status"; echo
+          curl -fsS --retry 60 --retry-delay 5 --retry-all-errors -o /dev/null "$BASE_URL" && echo "UI is up"
+
       - name: Run Playwright tests
         run: npx playwright test --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+
+      - name: Toolshop container logs
+        if: ${{ failure() && env.LOCAL_TOOLSHOP == 'true' }}
+        working-directory: toolshop
+        run: docker compose -p pst -f docker-compose.prod.yml logs --tail 100
 
       - name: Upload blob report
         if: ${{ !cancelled() }}
