@@ -23,9 +23,6 @@ export default defineConfig({
     trace: 'on-first-retry', // changed from retain-on-failure (course setting)
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
-    // Full Chromium in "new headless" mode instead of chromium-headless-shell: the site's
-    // Cloudflare bot check challenged the headless shell on GitHub runners.
-    channel: 'chromium',
   },
   projects: [
     // Creates ONE fresh user through the API, logs in through the UI once and saves storageState.
